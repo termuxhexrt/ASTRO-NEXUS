@@ -3923,6 +3923,25 @@ class AdvancedRaidFeatures:
                    f"Channels: {results['channels_created']} | Roles: {results['roles_created']} | Messages: {results['messages_sent']}")
         return results
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONFIGURATION LOADING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Load config or use defaults
+try:
+    with open("config.json") as f:
+        Config = json.load(f)
+    proxy = Config.get("Proxies", False)
+    color = Config.get("Theme", "light_blue")
+except:
+    # Default config if file doesn't exist
+    proxy = False
+    color = "light_blue"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RENDER CLASS - Terminal UI and Display
+# ═══════════════════════════════════════════════════════════════════════════════
+
 class Render:
     def __init__(self):
         try:
